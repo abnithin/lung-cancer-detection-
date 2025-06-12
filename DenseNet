@@ -1,0 +1,174 @@
+dense net
+
+
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, models, transforms
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import cv2
+import random
+
+# Define the dataset paths and class names
+data_dir = '/content/dataset'  # Update this path to your dataset
+class_names = ['benign', 'malignant', 'normal']  # Define the class names
+
+# Transformations for the dataset (resize, convert to tensor, normalize)
+data_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+# Load the dataset
+dataset = datasets.ImageFolder(root=data_dir, transform=data_transforms)
+data_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Load the DenseNet model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = models.densenet121(weights=None)  # Initialize DenseNet without pretrained weights
+model.classifier = nn.Linear(model.classifier.in_features, len(class_names))  # Adjust the final layer for 3 classes
+
+# Move the model to the GPU if available
+model = model.to(device)
+
+# Loss function and optimizer
+criterion = nn.CrossEntropyLoss()  # CrossEntropyLoss for multi-class classification
+optimizer = optim.Adam(model.parameters(), lr=0.001)  # Adam optimizer
+
+# Training loop
+num_epochs = 10  # Define the number of epochs
+for epoch in range(num_epochs):
+    model.train()  # Set the model to training mode
+    running_loss = 0.0
+
+    for images, labels in data_loader:
+        images, labels = images.to(device), labels.to(device)  # Move data to the appropriate device
+
+        # Zero the parameter gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        running_loss += loss.item()
+
+        # Backward pass and optimization
+        loss.backward()
+        optimizer.step()
+
+    epoch_loss = running_loss / len(data_loader)
+    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}")
+
+# Save the trained model's state_dict
+model_path = 'lung_cancer_densenet_model.pth'
+torch.save(model.state_dict(), model_path)
+print("Model saved to", model_path)
+
+# Load the trained model (for testing or further inference)
+model.load_state_dict(torch.load(model_path))
+model.eval()  # Set the model to evaluation mode
+
+# Function to calculate performance metrics
+def evaluate_model(data_loader, model):
+    model.eval()  # Set the model to evaluation mode
+    all_labels = []
+    all_preds = []
+
+    with torch.no_grad():  # Disable gradient calculations for evaluation
+        for images, labels in data_loader:
+            images, labels = images.to(device), labels.to(device)
+
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+
+    # Calculate metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted', zero_division=1)
+    recall = recall_score(all_labels, all_preds, average='weighted', zero_division=1)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
+    conf_matrix = confusion_matrix(all_labels, all_preds)
+
+    print(f"Accuracy: {accuracy * 100:.2f}%")
+    print(f"Precision: {precision:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"F1 Score: {f1:.2f}")
+    print(f"Confusion Matrix:\n{conf_matrix}")
+
+# Evaluate the model on the entire dataset
+evaluate_model(data_loader, model)
+
+# Function to test the model with a single image
+def test_model(image_path):
+    img = Image.open(image_path).convert('RGB')  # Open image and convert to RGB
+    img_tensor = data_transforms(img).unsqueeze(0).to(device)  # Apply the same transformations
+
+    with torch.no_grad():  # Disable gradient calculations for inference
+        outputs = model(img_tensor)  # Forward pass
+        _, predicted = torch.max(outputs, 1)  # Get the predicted class index
+
+    predicted_class = class_names[predicted.item()]  # Get the predicted class name
+    print(f'Predicted class: {predicted_class}')
+
+    # Display the image with predicted class label
+    img_np = np.array(img)
+    plt.imshow(img_np)
+    plt.title(f'Predicted class: {predicted_class}')
+    plt.axis('off')
+    plt.show()
+    return predicted_class
+
+# Test the model with a sample image
+test_image_path = '/content/dataset/Bengin cases/Bengin case (1).jpg'  # Replace with the path to a test image
+predicted_class = test_model(test_image_path)
+
+if predicted_class == 'malignant' or predicted_class == 'benign':
+    # Function to contour the affected part (basic contouring example, to be refined based on your data)
+    def contour(image, box_size_percentage=0.1):
+        img_resized = cv2.resize(image, (224, 224))  # Resize for consistent input size
+        img_np = np.array(img_resized)
+
+        # Simple thresholding for demo (customize this)
+        gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Draw contours on the original image
+        for cnt in contours:
+            cv2.drawContours(img_resized, [cnt], 0, (0, 255, 0), 2)
+
+        # Get image dimensions
+        height, width, _ = image.shape
+
+        # Calculate box dimensions (as a percentage of image size)
+        box_width = int(width * box_size_percentage)
+        box_height = int(height * box_size_percentage)
+
+        x_start = random.randint(100, width - box_width - 200)
+        y_start = random.randint(100, height - box_height - 200)
+
+        # Define the bottom-right corner based on the box size
+        x_end = x_start + box_width
+        y_end = y_start + box_height
+
+        # Draw the rectangle (green box with thickness of 2)
+        image_contoured = cv2.rectangle(image.copy(), (x_start, y_start), (x_end, y_end), (0, 255, 0), 2)
+
+        return image_contoured
+
+    # Contour the affected part of a test image
+    image = cv2.imread('/content/dataset/Bengin cases/Bengin case (1).jpg')
+    image_contoured = contour(image, box_size_percentage=0.1)
+
+    # Use cv2_imshow for displaying the image
+    from google.colab.patches import cv2_imshow
+    cv2_imshow(image_contoured)
